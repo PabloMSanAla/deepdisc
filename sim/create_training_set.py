@@ -362,27 +362,304 @@ class MultiComponentModel:
 
 
 if __name__ == "__main__":
-    # Example usage
-    r = np.linspace(0, 100, 500)
-    model = MultiComponentModel(
-        mue=20,
-        re=10,
-        n=2,
-        mu0=21,
-        h=[15, 30],
-        rbreaks=[40],
-    )
-    mu = model(r)
+    import os
+    from pathlib import Path
 
-    plt.figure()
-    plt.plot(r, mu, label="Total Model")
-    disc_components = model.get_components(r)
-    for i, disc in enumerate(disc_components):
-        plt.plot(r, disc, label=f"Disc Component {i+1}", linestyle="--")
-    bulge = sersic_sb(r, model.mue, model.re, model.n)
-    plt.plot(r, bulge, label="Bulge Component", linestyle=":")
-    plt.gca().invert_yaxis()
-    plt.xlabel("Radius (arcsec)")
-    plt.ylabel("Surface Brightness (mag/arcsec$^2$)")
-    plt.legend()
+    import matplotlib.animation as animation
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    # Set up paths
+    data_dir = Path("sim/data")
+    obs_file = Path("sim/observations/breaks_2025-04-15.csv")
+
+    # Create data directory if it doesn't exist
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    print("Loading observational data...")
+    # Load the observational data
+    df = pd.read_csv(obs_file)
+
+    # Filter valid break data (where breaks exist)
+    valid_breaks = df[
+        df["final_rbreaks1"].notna() & (df["final_rbreaks1"] > 0)
+    ]
+    print(f"Found {len(valid_breaks)} objects with valid breaks")
+
+    # Set random seed for reproducibility
+    np.random.seed(42)
+
+    # Number of simulated profiles to create
+    n_profiles = 10
+
+    # Radial grid for surface brightness profiles
+    r_max = 50  # arcsec
+    r = np.linspace(0.1, r_max, 200)
+
+    # Sample parameters from the observational distribution
+    print("Generating simulated profiles...")
+
+    profiles_data = []
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    for i in range(n_profiles):
+        # Sample a random object from the valid breaks
+        sample_idx = np.random.randint(0, len(valid_breaks))
+        sample_obj = valid_breaks.iloc[sample_idx]
+
+        # Extract parameters with some variation
+        base_mue = sample_obj.get("final_mue", 22.0)
+        base_re = sample_obj.get("final_re", 3.0)
+        base_n = sample_obj.get("final_n", 2.0)
+        base_mu0 = sample_obj.get("final_mu0", 20.0)
+
+        # Get break parameters
+        h1 = sample_obj.get("final_h1", 2.0)
+        rbreak1 = sample_obj.get("final_rbreaks1", 10.0)
+
+        # Check for second break
+        h2 = sample_obj.get("final_h2", h1 * 1.5)
+        rbreak2 = sample_obj.get("final_rbreaks2", None)
+
+        # Add some random variation to parameters (±10%)
+        mue = base_mue + np.random.normal(0, 0.3)
+        re = max(0.5, base_re + np.random.normal(0, base_re * 0.1))
+        n = max(0.3, min(8.0, base_n + np.random.normal(0, 0.2)))
+        mu0 = base_mu0 + np.random.normal(0, 0.2)
+
+        # Scale lengths and breaks
+        h1_sim = max(0.5, h1 + np.random.normal(0, h1 * 0.1))
+        rbreak1_sim = max(2.0, rbreak1 + np.random.normal(0, rbreak1 * 0.1))
+
+        # Create model based on number of breaks
+        if pd.notna(rbreak2) and rbreak2 > 0:
+            # Two break model
+            h2_sim = max(0.5, h2 + np.random.normal(0, h2 * 0.1))
+            rbreak2_sim = max(
+                rbreak1_sim + 2, rbreak2 + np.random.normal(0, rbreak2 * 0.1)
+            )
+            h_array = [h1_sim, h2_sim, h2_sim * 1.5]
+            rbreaks_array = [rbreak1_sim, rbreak2_sim]
+        else:
+            # Single break model
+            h2_sim = max(0.5, h1_sim * (1.5 + np.random.normal(0, 0.3)))
+            h_array = [h1_sim, h2_sim]
+            rbreaks_array = [rbreak1_sim]
+
+        # Create the model
+        try:
+            model = MultiComponentModel(
+                mue=mue, re=re, n=n, mu0=mu0, h=h_array, rbreaks=rbreaks_array
+            )
+
+            # Generate clean surface brightness profile
+            mu_clean = model(r)
+
+            # Add realistic noise
+            # Noise increases with radius and fainter surface brightness
+            noise_level = 0.1 + 0.02 * r + 0.05 * np.exp(0.1 * (mu_clean - 20))
+            noise = np.random.normal(0, noise_level)
+            mu_noisy = mu_clean + noise
+
+            # Store profile data
+            profile_data = {
+                "profile_id": f"sim_{i+1:03d}",
+                "original_object_id": sample_obj["object_id"],
+                "r": r.copy(),
+                "mu_clean": mu_clean.copy(),
+                "mu_noisy": mu_noisy.copy(),
+                "noise": noise.copy(),
+                "parameters": model.get_dictionary(),
+            }
+            profiles_data.append(profile_data)
+
+            # Save individual profile data
+            profile_file = data_dir / f"profile_{i+1:03d}.npz"
+            np.savez(
+                profile_file,
+                r=r,
+                mu_clean=mu_clean,
+                mu_noisy=mu_noisy,
+                noise=noise,
+            )
+
+            # Save parameters to text file
+            param_file = data_dir / f"profile_{i+1:03d}_params.txt"
+            with open(param_file, "w") as f:
+                f.write(f"Simulated Surface Brightness Profile {i+1:03d}\n")
+                f.write(f"Generated from object: {sample_obj['object_id']}\n")
+                f.write("=" * 50 + "\n\n")
+                f.write("Model Parameters:\n")
+                f.write("-" * 20 + "\n")
+                params = model.get_dictionary()
+                for key, value in params.items():
+                    f.write(f"{key}: {value:.4f}\n")
+                f.write(f"\nNumber of breaks: {len(rbreaks_array)}\n")
+                f.write(f"Radial range: {r[0]:.2f} - {r[-1]:.2f} arcsec\n")
+                f.write(f"Noise RMS: {np.std(noise):.4f} mag/arcsec²\n")
+
+            print(f"Profile {i+1:03d} generated and saved")
+
+        except Exception as e:
+            print(f"Error generating profile {i+1}: {e}")
+            continue
+
+    print(f"\nGenerated {len(profiles_data)} profiles successfully")
+
+    # Create animation showing all profiles
+    print("Creating animation...")
+
+    def animate(frame):
+        ax.clear()
+
+        if frame < len(profiles_data):
+            profile = profiles_data[frame]
+            r_data = profile["r"]
+            mu_clean = profile["mu_clean"]
+            mu_noisy = profile["mu_noisy"]
+            params = profile["parameters"]
+
+            # Plot the surface brightness profile
+            ax.plot(
+                r_data,
+                mu_clean,
+                "b-",
+                linewidth=2,
+                label="Clean model",
+                alpha=0.8,
+            )
+            ax.plot(
+                r_data,
+                mu_noisy,
+                "r-",
+                linewidth=1,
+                label="With noise",
+                alpha=0.7,
+            )
+
+            # Plot individual components if possible
+            try:
+                model = MultiComponentModel(
+                    mue=params["mue"],
+                    re=params["re"],
+                    n=params["n"],
+                    mu0=params["mu0"],
+                    h=[
+                        params[k]
+                        for k in params.keys()
+                        if k.startswith("h") and k[1:].isdigit()
+                    ],
+                    rbreaks=[
+                        params[k]
+                        for k in params.keys()
+                        if k.startswith("rbreak") and k[6:].isdigit()
+                    ],
+                )
+
+                # Plot components
+                disc_components = model.get_components(r_data)
+                for j, disc in enumerate(disc_components):
+                    ax.plot(r_data, disc, "--", alpha=0.5, label=f"Disc {j+1}")
+
+                # Plot bulge
+                bulge = sersic_sb(r_data, model.mue, model.re, model.n)
+                ax.plot(r_data, bulge, ":", alpha=0.5, label="Bulge")
+
+            except:
+                pass
+
+            ax.invert_yaxis()
+            ax.set_xlabel("Radius (arcsec)")
+            ax.set_ylabel("Surface Brightness (mag/arcsec²)")
+            ax.set_title(
+                f'Profile {frame+1:03d} - Object: {profile["original_object_id"]}\n'
+                f'Breaks: {params.get("ndiscs", 1)-1} | '
+                f'μₑ={params.get("mue", 0):.1f}, rₑ={params.get("re", 0):.1f}, '
+                f'n={params.get("n", 0):.1f}'
+            )
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+            ax.set_xlim(0, r_max)
+
+            # Set y-limits based on data
+            valid_mu = mu_noisy[np.isfinite(mu_noisy)]
+            if len(valid_mu) > 0:
+                y_min = min(np.min(valid_mu) - 1, 18)
+                y_max = max(np.max(valid_mu) + 1, 28)
+                ax.set_ylim(y_max, y_min)
+
+    # Create and save animation
+    ani = animation.FuncAnimation(
+        fig,
+        animate,
+        frames=len(profiles_data),
+        interval=2000,
+        repeat=True,
+        blit=False,
+    )
+
+    # Save as MP4 video
+    video_file = data_dir / "surface_brightness_profiles.mp4"
+    try:
+        ani.save(str(video_file), writer="ffmpeg", fps=0.5, bitrate=1800)
+        print(f"Video saved as: {video_file}")
+    except Exception as e:
+        print(f"Could not save video (ffmpeg might not be installed): {e}")
+        # Save as GIF as fallback
+        gif_file = data_dir / "surface_brightness_profiles.gif"
+        try:
+            ani.save(str(gif_file), writer="pillow", fps=0.5)
+            print(f"Animation saved as GIF: {gif_file}")
+        except Exception as e2:
+            print(f"Could not save GIF either: {e2}")
+
+    # Create summary plot with all profiles
+    fig_summary, ax_summary = plt.subplots(figsize=(12, 8))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(profiles_data)))
+
+    for i, profile in enumerate(profiles_data):
+        ax_summary.plot(
+            profile["r"],
+            profile["mu_noisy"],
+            color=colors[i],
+            alpha=0.7,
+            linewidth=1,
+            label=f"Profile {i+1}",
+        )
+
+    ax_summary.invert_yaxis()
+    ax_summary.set_xlabel("Radius (arcsec)")
+    ax_summary.set_ylabel("Surface Brightness (mag/arcsec²)")
+    ax_summary.set_title(
+        f"All {len(profiles_data)} Simulated Surface Brightness Profiles"
+    )
+    ax_summary.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
+    ax_summary.grid(True, alpha=0.3)
+
+    summary_file = data_dir / "all_profiles_summary.png"
+    plt.tight_layout()
+    plt.savefig(summary_file, dpi=150, bbox_inches="tight")
+    print(f"Summary plot saved as: {summary_file}")
+
+    # Save combined dataset
+    combined_file = data_dir / "all_profiles_data.npz"
+    all_r = np.array([p["r"] for p in profiles_data])
+    all_mu_clean = np.array([p["mu_clean"] for p in profiles_data])
+    all_mu_noisy = np.array([p["mu_noisy"] for p in profiles_data])
+    all_noise = np.array([p["noise"] for p in profiles_data])
+
+    np.savez(
+        combined_file,
+        r=all_r,
+        mu_clean=all_mu_clean,
+        mu_noisy=all_mu_noisy,
+        noise=all_noise,
+        profile_ids=[p["profile_id"] for p in profiles_data],
+        object_ids=[p["original_object_id"] for p in profiles_data],
+    )
+
+    print(f"Combined dataset saved as: {combined_file}")
+    print(f"\nAll files saved in: {data_dir}")
+
     plt.show()
